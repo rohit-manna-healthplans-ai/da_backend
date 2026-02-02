@@ -1,0 +1,11 @@
+flask
+flask-cors
+pymongo
+werkzeug
+PyJWT
+flask
+flask-cors
+flask-pymongo
+flask-jwt-extended
+python-dotenv
+gunicorn
