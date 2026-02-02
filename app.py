@@ -32,7 +32,7 @@ app = Flask(__name__)
 if CORS_ORIGINS == "*" or CORS_ORIGINS == ["*"]:
     CORS(
         app,
-        resources={r"/*": {"origins": "*"}},
+        resources={r"/api/*": {"origins": "*"}},
         supports_credentials=True,
         allow_headers=["Content-Type", "Authorization"],
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -40,7 +40,7 @@ if CORS_ORIGINS == "*" or CORS_ORIGINS == ["*"]:
 else:
     CORS(
         app,
-        resources={r"/*": {"origins": CORS_ORIGINS}},
+        resources={r"/api/*": {"origins": CORS_ORIGINS}},
         supports_credentials=True,
         allow_headers=["Content-Type", "Authorization"],
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
