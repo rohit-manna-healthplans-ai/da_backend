@@ -69,6 +69,14 @@ def get_range_from_request() -> Tuple[datetime, datetime, str, str]:
     elif end and not start:
         start = end
 
+    # Safety guard: prevent extremely large ranges from overloading the server.
+    # Clamp to a maximum window (e.g. 90 days) while preserving the end date.
+    max_days = 90
+    span_days = (end - start).days
+    if span_days > max_days:
+        end = datetime(end.year, end.month, end.day)
+        start = end - timedelta(days=max_days - 1)
+
     return start, end, (from_s or start.strftime("%Y-%m-%d")), (to_s or end.strftime("%Y-%m-%d"))
 
 
@@ -157,37 +165,47 @@ def read_archives(col, mac_id: str, key: str, day: str):
 def iter_log_events(mac_ids: List[str], start: datetime, end: datetime) -> Iterable[Dict[str, Any]]:
     if not mac_ids:
         return
-    for doc in logs.find({"_id": {"$in": mac_ids}}):
+    # Project only the logs bucket to avoid pulling large unused fields.
+    for doc in logs.find({"_id": {"$in": mac_ids}}, {"logs": 1}):
         mac = doc.get("_id")
         for day in daterange(start, end):
-            events = list(read_bucket(doc, "logs", day))
-            for a in read_archives(logs, mac, "logs", day):
-                events.extend(read_bucket(a, "logs", day))
-            for e in events:
+            # Stream events instead of materializing all into a list to keep
+            # memory usage low when many days/users are selected.
+            for e in read_bucket(doc, "logs", day):
                 if isinstance(e, dict):
-                    # Defensive: some deployments had mixed user_mac_id events inside the wrong doc.
-                    # Keep overview KPIs correct by filtering to the owning mac when present.
                     um = e.get("user_mac_id")
                     if um and mac and str(um) != str(mac):
                         continue
                     yield e
+            for a in read_archives(logs, mac, "logs", day):
+                for e in read_bucket(a, "logs", day):
+                    if isinstance(e, dict):
+                        um = e.get("user_mac_id")
+                        if um and mac and str(um) != str(mac):
+                            continue
+                        yield e
 
 
 def iter_screenshot_events(mac_ids: List[str], start: datetime, end: datetime) -> Iterable[Dict[str, Any]]:
     if not mac_ids:
         return
-    for doc in screenshots.find({"_id": {"$in": mac_ids}}):
+    # Project only the screenshots bucket to avoid pulling large unused fields.
+    for doc in screenshots.find({"_id": {"$in": mac_ids}}, {"screenshots": 1}):
         mac = doc.get("_id")
         for day in daterange(start, end):
-            items = list(read_bucket(doc, "screenshots", day))
-            for a in read_archives(screenshots, mac, "screenshots", day):
-                items.extend(read_bucket(a, "screenshots", day))
-            for s in items:
+            for s in read_bucket(doc, "screenshots", day):
                 if isinstance(s, dict):
                     um = s.get("user_mac_id")
                     if um and mac and str(um) != str(mac):
                         continue
                     yield s
+            for a in read_archives(screenshots, mac, "screenshots", day):
+                for s in read_bucket(a, "screenshots", day):
+                    if isinstance(s, dict):
+                        um = s.get("user_mac_id")
+                        if um and mac and str(um) != str(mac):
+                            continue
+                        yield s
 
 
 
@@ -233,14 +251,6 @@ def compute_active_minutes(events_by_user: Dict[str, List[datetime]], gap_minute
     for _mac, times in events_by_user.items():
         total_seconds += _sessionize_seconds(times, gap_minutes=gap_minutes)
     return int(total_seconds // 60)
-
-
-@insights_api.before_app_request
-def _init_indexes():
-    try:
-        ensure_indexes()
-    except Exception:
-        pass
 
 
 # --------------------------

@@ -27,6 +27,19 @@ import ingest  # used for ingest endpoints
 app = Flask(__name__)
 
 # -----------------------------
+# One-time index initialization
+# -----------------------------
+try:
+    # Heavy index inspection/creation should not run on every request.
+    # Doing it once during startup keeps request latency low,
+    # especially on larger Mongo deployments.
+    ensure_indexes()
+except Exception:
+    # If index creation fails we still want the app to start; queries will
+    # continue using whatever indexes already exist.
+    pass
+
+# -----------------------------
 # CORS
 # -----------------------------
 if CORS_ORIGINS == "*" or CORS_ORIGINS == ["*"]:

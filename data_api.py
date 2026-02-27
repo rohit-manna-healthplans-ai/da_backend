@@ -87,6 +87,13 @@ def get_range_from_request() -> Tuple[datetime, datetime]:
     elif end and not start:
         start = end
 
+    # Safety guard: prevent huge date windows from overloading queries.
+    max_days = 90
+    span_days = (end - start).days
+    if span_days > max_days:
+        end = datetime(end.year, end.month, end.day)
+        start = end - timedelta(days=max_days - 1)
+
     return start, end
 
 
@@ -228,10 +235,9 @@ def _apply_user_filters(mac_ids: List[str]) -> Tuple[List[str], Optional[str]]:
 
 @data_api.before_app_request
 def _init_indexes():
-    try:
-        ensure_indexes()
-    except Exception:
-        pass
+    # Indexes are now initialized once at startup in app.py.
+    # Keep this hook lightweight to avoid per-request overhead.
+    return None
 
 
 @data_api.get("/api/logs")
@@ -252,40 +258,42 @@ def get_logs():
     out: List[Dict[str, Any]] = []
 
     # IMPORTANT: query only filtered IDs (prevents department-level merging in user view)
-    for doc in logs.find({"_id": {"$in": mac_ids}}):
+    # Project only the logs bucket to keep Mongo payloads small.
+    for doc in logs.find({"_id": {"$in": mac_ids}}, {"logs": 1}):
         mac = doc.get("_id")
         u = umap.get(mac, {})
 
         for day in daterange(start, end):
-            events = list(read_bucket(doc, "logs", day))
+            # Stream events to avoid building large intermediate lists.
+            buckets = [read_bucket(doc, "logs", day)]
             for a in read_archives(logs, mac, "logs", day):
-                events.extend(read_bucket(a, "logs", day))
+                buckets.append(read_bucket(a, "logs", day))
 
-            for e in events:
-                if not isinstance(e, dict):
-                    continue
+            for bucket in buckets:
+                for e in bucket:
+                    if not isinstance(e, dict):
+                        continue
 
-                # Extra safety: if a target was requested, skip any event claiming another user
-                claimed = e.get("user_mac_id") or mac
-                if target_mac and claimed != target_mac:
-                    continue
+                    claimed = e.get("user_mac_id") or mac
+                    if target_mac and claimed != target_mac:
+                        continue
 
-                out.append(
-                    {
-                        "ts": e.get("ts"),
-                        "application": e.get("application"),
-                        "category": e.get("category"),
-                        "operation": e.get("operation"),
-                        "details": e.get("details") if e.get("details") is not None else e.get("detail"),
-                        "window_title": e.get("window_title"),
-                        "detail": e.get("detail"),
-                        "company_username": u.get("company_username_norm") or u.get("company_username"),
-                        "full_name": u.get("full_name"),
-                        "department": u.get("department"),
-                        "role_key": u.get("role_key"),
-                        "user_mac_id": mac,
-                    }
-                )
+                    out.append(
+                        {
+                            "ts": e.get("ts"),
+                            "application": e.get("application"),
+                            "category": e.get("category"),
+                            "operation": e.get("operation"),
+                            "details": e.get("details") if e.get("details") is not None else e.get("detail"),
+                            "window_title": e.get("window_title"),
+                            "detail": e.get("detail"),
+                            "company_username": u.get("company_username_norm") or u.get("company_username"),
+                            "full_name": u.get("full_name"),
+                            "department": u.get("department"),
+                            "role_key": u.get("role_key"),
+                            "user_mac_id": mac,
+                        }
+                    )
 
     out.sort(key=lambda x: x.get("ts") or "", reverse=True)
     return ok(paginate(out, page, limit))
@@ -309,38 +317,40 @@ def get_screenshots():
     out: List[Dict[str, Any]] = []
 
     # IMPORTANT: query only filtered IDs (prevents department-level merging in user view)
-    for doc in screenshots.find({"_id": {"$in": mac_ids}}):
+    # Project only the screenshots bucket to keep Mongo payloads small.
+    for doc in screenshots.find({"_id": {"$in": mac_ids}}, {"screenshots": 1}):
         mac = doc.get("_id")
         u = umap.get(mac, {})
 
         for day in daterange(start, end):
-            items = list(read_bucket(doc, "screenshots", day))
+            buckets = [read_bucket(doc, "screenshots", day)]
             for a in read_archives(screenshots, mac, "screenshots", day):
-                items.extend(read_bucket(a, "screenshots", day))
+                buckets.append(read_bucket(a, "screenshots", day))
 
-            for s in items:
-                if not isinstance(s, dict):
-                    continue
+            for bucket in buckets:
+                for s in bucket:
+                    if not isinstance(s, dict):
+                        continue
 
-                claimed = s.get("user_mac_id") or mac
-                if target_mac and claimed != target_mac:
-                    continue
+                    claimed = s.get("user_mac_id") or mac
+                    if target_mac and claimed != target_mac:
+                        continue
 
-                out.append(
-                    {
-                        "ts": s.get("ts"),
-                        "application": s.get("application"),
-                        "window_title": s.get("window_title"),
-                        "label": s.get("label"),
-                        "file_path": s.get("file_path") or s.get("path"),
-                        "screenshot_url": s.get("screenshot_url") or s.get("url") or s.get("path"),
-                        "company_username": u.get("company_username_norm") or u.get("company_username"),
-                        "full_name": u.get("full_name"),
-                        "department": u.get("department"),
-                        "role_key": u.get("role_key"),
-                        "user_mac_id": claimed,
-                    }
-                )
+                    out.append(
+                        {
+                            "ts": s.get("ts"),
+                            "application": s.get("application"),
+                            "window_title": s.get("window_title"),
+                            "label": s.get("label"),
+                            "file_path": s.get("file_path") or s.get("path"),
+                            "screenshot_url": s.get("screenshot_url") or s.get("url") or s.get("path"),
+                            "company_username": u.get("company_username_norm") or u.get("company_username"),
+                            "full_name": u.get("full_name"),
+                            "department": u.get("department"),
+                            "role_key": u.get("role_key"),
+                            "user_mac_id": claimed,
+                        }
+                    )
 
     out.sort(key=lambda x: x.get("ts") or "", reverse=True)
     return ok(paginate(out, page, limit))
