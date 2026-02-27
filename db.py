@@ -1,10 +1,22 @@
+import os
+
 from pymongo import MongoClient, ASCENDING
 from config import MONGO_URI, MONGO_DB
 
 # -----------------------------
-# Mongo Connection
+# Mongo Connection (with sane timeouts)
 # -----------------------------
-client = MongoClient(MONGO_URI)
+_BASE_TIMEOUT_MS = int(os.getenv("MONGO_TIMEOUT_MS", "5000"))
+_SOCKET_TIMEOUT_MS = int(os.getenv("MONGO_SOCKET_TIMEOUT_MS", "15000"))
+_MAX_POOL_SIZE = int(os.getenv("MONGO_MAX_POOL_SIZE", "50"))
+
+client = MongoClient(
+    MONGO_URI,
+    serverSelectionTimeoutMS=_BASE_TIMEOUT_MS,
+    connectTimeoutMS=_BASE_TIMEOUT_MS,
+    socketTimeoutMS=_SOCKET_TIMEOUT_MS,
+    maxPoolSize=_MAX_POOL_SIZE,
+)
 db = client[MONGO_DB]
 
 # -----------------------------
