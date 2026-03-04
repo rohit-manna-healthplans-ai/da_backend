@@ -3,8 +3,9 @@ from flask_cors import CORS
 from datetime import datetime
 import secrets
 import re
+from threading import Thread
 
-from config import CORS_ORIGINS, DEBUG, HOST, PORT
+from config import CORS_ORIGINS, DEBUG, HOST, PORT, RUN_OCR_WORKER
 from db import ensure_indexes, users
 from auth import (
     verify_password,
@@ -21,6 +22,7 @@ from data_api import data_api as data_api_bp
 from insights import insights_api as insights_api_bp
 from users_api import users_api as users_api_bp
 from departments_api import departments_api as departments_api_bp
+from ocr_api import ocr_api as ocr_api_bp
 
 import ingest  # used for ingest endpoints
 
@@ -66,6 +68,18 @@ app.register_blueprint(data_api_bp)
 app.register_blueprint(insights_api_bp)
 app.register_blueprint(users_api_bp)
 app.register_blueprint(departments_api_bp)
+app.register_blueprint(ocr_api_bp)
+
+# -----------------------------
+# OCR worker (same process)
+# -----------------------------
+if RUN_OCR_WORKER:
+    try:
+        from ocr_intermediator import run_forever
+        _ocr_thread = Thread(target=run_forever, daemon=True, name="ocr_worker")
+        _ocr_thread.start()
+    except Exception:
+        pass  # OCR optional; app still serves API
 
 
 def ok(data=None, status=200):

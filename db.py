@@ -22,6 +22,7 @@ db = client[MONGO_DB]
 # -----------------------------
 # Collections (exported)
 # -----------------------------
+# db is used by ocr_intermediator for ocr_state and optional collection name
 users = db["users"]
 departments = db["departments"]
 logs = db["logs"]
