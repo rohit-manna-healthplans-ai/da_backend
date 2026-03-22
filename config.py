@@ -1,7 +1,10 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load .env from backend directory so CORS/Mongo etc. are correct regardless of cwd
+_config_dir = Path(__file__).resolve().parent
+load_dotenv(_config_dir / ".env")
 
 # Environment
 DEBUG = os.getenv("DEBUG", "1") == "1"
@@ -17,12 +20,26 @@ JWT_SECRET = os.getenv("JWT_SECRET", "mysecretkey")
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB = os.getenv("MONGO_DB", "Discovery_Agent")
 
-# CORS
-CORS_ORIGINS_RAW = os.getenv("CORS_ORIGINS", "*").strip()
-if CORS_ORIGINS_RAW == "*":
-    CORS_ORIGINS = "*"
+# Analysis / Insights date range (production: allow years of data; cap to prevent abuse)
+# e.g. 730 = 2 years, 1095 = 3 years. Use 3650 for ~10 years.
+MAX_ANALYSIS_DAYS = max(90, min(3650, int(os.getenv("MAX_ANALYSIS_DAYS", "730"))))
+# List endpoints (logs/screenshots) can use same or smaller to avoid huge in-memory sort
+MAX_LIST_DAYS = max(30, min(MAX_ANALYSIS_DAYS, int(os.getenv("MAX_LIST_DAYS", "365"))))
+
+# CORS (cannot use "*" with supports_credentials=True per CORS spec; use explicit origins)
+_DEFAULT_CORS_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+CORS_ORIGINS_RAW = (os.getenv("CORS_ORIGINS") or "*").strip()
+if CORS_ORIGINS_RAW == "*" or not CORS_ORIGINS_RAW:
+    CORS_ORIGINS = _DEFAULT_CORS_ORIGINS.copy()
 else:
     CORS_ORIGINS = [o.strip() for o in CORS_ORIGINS_RAW.split(",") if o.strip()]
+if not CORS_ORIGINS:
+    CORS_ORIGINS = _DEFAULT_CORS_ORIGINS.copy()
 
 # OCR Intermediator (same .env as backend)
 MONGO_COLLECTION_SCREENSHOTS = os.getenv("MONGO_COLLECTION", "screenshots")

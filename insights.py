@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from flask import Blueprint, jsonify, request, g
 
+from config import MAX_ANALYSIS_DAYS
 from db import ensure_indexes, users, logs, screenshots
 from rbac import require_dashboard_access, require_overview_access, ROLE_C_SUITE, ROLE_DEPT_HEAD, ROLE_DEPT_MEMBER
 
@@ -69,13 +70,13 @@ def get_range_from_request() -> Tuple[datetime, datetime, str, str]:
     elif end and not start:
         start = end
 
-    # Safety guard: prevent extremely large ranges from overloading the server.
-    # Clamp to a maximum window (e.g. 90 days) while preserving the end date.
-    max_days = 90
+    # Production: allow years of data; cap from config to prevent abuse
     span_days = (end - start).days
-    if span_days > max_days:
+    if span_days > MAX_ANALYSIS_DAYS:
         end = datetime(end.year, end.month, end.day)
-        start = end - timedelta(days=max_days - 1)
+        start = end - timedelta(days=MAX_ANALYSIS_DAYS - 1)
+        from_s = start.strftime("%Y-%m-%d")
+        to_s = end.strftime("%Y-%m-%d")
 
     return start, end, (from_s or start.strftime("%Y-%m-%d")), (to_s or end.strftime("%Y-%m-%d"))
 
@@ -151,7 +152,15 @@ def user_map(mac_ids: List[str]) -> Dict[str, Dict[str, Any]]:
 
 
 def read_bucket(doc: Dict[str, Any], key: str, day: str):
-    return (doc.get(key) or {}).get(day, []) or []
+    val = doc.get(key)
+    if val is None:
+        return []
+    if isinstance(val, list):
+        # Some docs store the bucket as a flat list (no day key); cannot look up by day
+        return []
+    if isinstance(val, dict):
+        return val.get(day, []) or []
+    return []
 
 
 def read_archives(col, mac_id: str, key: str, day: str):
@@ -162,22 +171,69 @@ def read_archives(col, mac_id: str, key: str, day: str):
     return col.find({"_id": {"$regex": f"^{safe_prefix}"}})
 
 
-def iter_log_events(mac_ids: List[str], start: datetime, end: datetime) -> Iterable[Dict[str, Any]]:
+def _aggregate_days_to_buckets(
+    days: List[str], per_day_values: Dict[str, float], bucket: str
+) -> Tuple[List[str], List[int]]:
+    """Aggregate per-day series to week or month for large ranges. Returns (labels, values)."""
+    if bucket == "week":
+        buckets: Dict[str, float] = defaultdict(float)
+        for d in days:
+            dt = parse_ymd(d)
+            if not dt:
+                continue
+            year, week, _ = dt.isocalendar()
+            key = f"{year}-W{week:02d}"
+            buckets[key] += per_day_values.get(d, 0)
+        labels = sorted(buckets.keys(), key=lambda x: (int(x.split("-")[0]), int(x.split("-")[1].replace("W", ""))))
+        return labels, [int(buckets[l]) for l in labels]
+    if bucket == "month":
+        buckets = defaultdict(float)
+        for d in days:
+            key = d[:7]
+            buckets[key] += per_day_values.get(d, 0)
+        labels = sorted(buckets.keys())
+        return labels, [int(buckets[l]) for l in labels]
+    return days, [int(per_day_values.get(d, 0)) for d in days]
+
+
+def _fetch_archives_by_day(col, mac_id: str, key: str, days_set) -> Dict[str, List[Dict[str, Any]]]:
+    """Fetch all archive docs for this user/key in one query, grouped by day. Speeds up large ranges."""
+    if not days_set:
+        return {}
+    safe_mac = re.escape(str(mac_id))
+    pattern = f"^{safe_mac}\\|archive\\|{re.escape(key)}\\|"
+    cursor = col.find({"_id": {"$regex": pattern}})
+    by_day: Dict[str, List[Dict[str, Any]]] = {d: [] for d in days_set}
+    for doc in cursor:
+        parts = (doc.get("_id") or "").split("|")
+        if len(parts) >= 4:
+            day = parts[3]
+            if day in by_day:
+                by_day[day].append(doc)
+    return by_day
+
+
+def iter_log_events(
+    mac_ids: List[str], start: datetime, end: datetime,
+    logs_archives_by_user: Optional[Dict[str, Dict[str, List[Dict[str, Any]]]]] = None,
+) -> Iterable[Dict[str, Any]]:
     if not mac_ids:
         return
-    # Project only the logs bucket to avoid pulling large unused fields.
+    days_list = list(daterange(start, end))
+    if logs_archives_by_user is None:
+        days_set = set(days_list)
+        logs_archives_by_user = {mac: _fetch_archives_by_day(logs, mac, "logs", days_set) for mac in mac_ids}
     for doc in logs.find({"_id": {"$in": mac_ids}}, {"logs": 1}):
         mac = doc.get("_id")
-        for day in daterange(start, end):
-            # Stream events instead of materializing all into a list to keep
-            # memory usage low when many days/users are selected.
+        archives_for_mac = logs_archives_by_user.get(mac, {})
+        for day in days_list:
             for e in read_bucket(doc, "logs", day):
                 if isinstance(e, dict):
                     um = e.get("user_mac_id")
                     if um and mac and str(um) != str(mac):
                         continue
                     yield e
-            for a in read_archives(logs, mac, "logs", day):
+            for a in archives_for_mac.get(day, []):
                 for e in read_bucket(a, "logs", day):
                     if isinstance(e, dict):
                         um = e.get("user_mac_id")
@@ -186,20 +242,27 @@ def iter_log_events(mac_ids: List[str], start: datetime, end: datetime) -> Itera
                         yield e
 
 
-def iter_screenshot_events(mac_ids: List[str], start: datetime, end: datetime) -> Iterable[Dict[str, Any]]:
+def iter_screenshot_events(
+    mac_ids: List[str], start: datetime, end: datetime,
+    shots_archives_by_user: Optional[Dict[str, Dict[str, List[Dict[str, Any]]]]] = None,
+) -> Iterable[Dict[str, Any]]:
     if not mac_ids:
         return
-    # Project only the screenshots bucket to avoid pulling large unused fields.
+    days_list = list(daterange(start, end))
+    if shots_archives_by_user is None:
+        days_set = set(days_list)
+        shots_archives_by_user = {mac: _fetch_archives_by_day(screenshots, mac, "screenshots", days_set) for mac in mac_ids}
     for doc in screenshots.find({"_id": {"$in": mac_ids}}, {"screenshots": 1}):
         mac = doc.get("_id")
-        for day in daterange(start, end):
+        archives_for_mac = shots_archives_by_user.get(mac, {})
+        for day in days_list:
             for s in read_bucket(doc, "screenshots", day):
                 if isinstance(s, dict):
                     um = s.get("user_mac_id")
                     if um and mac and str(um) != str(mac):
                         continue
                     yield s
-            for a in read_archives(screenshots, mac, "screenshots", day):
+            for a in archives_for_mac.get(day, []):
                 for s in read_bucket(a, "screenshots", day):
                     if isinstance(s, dict):
                         um = s.get("user_mac_id")
@@ -375,6 +438,7 @@ def dashboard():
     if not mac_ids:
         return ok({
             "range": {"from": from_s, "to": to_s},
+            "data_in_range": False,
             "scope": {"label": "No users in scope"},
             "kpis": {
                 "unique_users": 0,
@@ -398,6 +462,11 @@ def dashboard():
             },
         })
 
+    # Pre-fetch all archives in one query per user (production: avoids N*days queries)
+    days_set = set(labels_days)
+    logs_archives_by_user = {mac: _fetch_archives_by_day(logs, mac, "logs", days_set) for mac in mac_ids}
+    shots_archives_by_user = {mac: _fetch_archives_by_day(screenshots, mac, "screenshots", days_set) for mac in mac_ids}
+
     # Aggregations
     logs_count = 0
     shots_count = 0
@@ -420,8 +489,8 @@ def dashboard():
     # week-hour heatmap (Mon..Sun x hour)
     week_hour = Counter()
 
-    # Collect log events
-    for e in iter_log_events(mac_ids, start, end):
+    # Collect log events (using pre-fetched archives for speed)
+    for e in iter_log_events(mac_ids, start, end, logs_archives_by_user):
         logs_count += 1
         app = str(e.get("application") or "(unknown)")
         cat = str(e.get("category") or "(unknown)")
@@ -443,8 +512,8 @@ def dashboard():
                 wd = {"Mon": "Mon", "Tue": "Tue", "Wed": "Wed", "Thu": "Thu", "Fri": "Fri", "Sat": "Sat", "Sun": "Sun"}.get(wd, wd)
                 week_hour[f"{wd}_{dt.hour}"] += 1
 
-    # Collect screenshot events
-    for s in iter_screenshot_events(mac_ids, start, end):
+    # Collect screenshot events (using pre-fetched archives for speed)
+    for s in iter_screenshot_events(mac_ids, start, end, shots_archives_by_user):
         shots_count += 1
         dt = parse_iso(s.get("ts") or "")
         if dt:
@@ -471,7 +540,42 @@ def dashboard():
         for d, times in days.items():
             per_day_active_seconds[d] += _sessionize_seconds(times, gap_minutes=5)
 
-    activity_minutes_by_day = [int(per_day_active_seconds[d] // 60) for d in labels_days]
+    # For large ranges, aggregate chart series to week/month (production: keep payload and charts usable)
+    n_days = len(labels_days)
+    if n_days > 365:
+        bucket_type = "month"
+    elif n_days > 90:
+        bucket_type = "week"
+    else:
+        bucket_type = "day"
+
+    if bucket_type == "day":
+        chart_labels = labels_days
+        activity_minutes_series = [int(per_day_active_seconds[d] // 60) for d in labels_days]
+        shots_series = [shots_by_day[d] for d in labels_days]
+        # Apps trend: one row per day
+        top5_apps = [k for k, _v in apps_counter.most_common(5)]
+        apps_trend_rows = [{"day": d, **{app: int(app_counts_by_day[d].get(app, 0)) for app in top5_apps}} for d in labels_days]
+    else:
+        chart_labels, activity_minutes_series = _aggregate_days_to_buckets(
+            labels_days, {d: per_day_active_seconds[d] // 60 for d in labels_days}, bucket_type
+        )
+        _, shots_series = _aggregate_days_to_buckets(labels_days, dict(shots_by_day), bucket_type)
+        top5_apps = [k for k, _v in apps_counter.most_common(5)]
+        # Aggregate app counts by bucket
+        buckets_app_counts: Dict[str, Counter] = defaultdict(Counter)
+        for d in labels_days:
+            dt = parse_ymd(d)
+            if not dt:
+                continue
+            if bucket_type == "week":
+                y, w, _ = dt.isocalendar()
+                key = f"{y}-W{w:02d}"
+            else:
+                key = d[:7]
+            for app in top5_apps:
+                buckets_app_counts[key][app] += app_counts_by_day[d].get(app, 0)
+        apps_trend_rows = [{"day": k, **{app: int(buckets_app_counts[k].get(app, 0)) for app in top5_apps}} for k in chart_labels]
 
     # KPIs
     total_apps = len([k for k, v in apps_counter.items() if v > 0 and k != "(unknown)"]) or len(apps_counter)
@@ -480,19 +584,9 @@ def dashboard():
     last_updated = last_updated_dt.isoformat() if last_updated_dt else None
 
     # Charts:
-    # Top apps (bar)
     top_apps_items = [{"name": k, "count": v} for k, v in apps_counter.most_common(10)]
-
-    # Category distribution (donut) + top categories (bar)
     cat_items = [{"name": k, "count": v} for k, v in cat_counter.most_common(30)]
     top_categories_items = [{"name": k, "count": v} for k, v in cat_counter.most_common(10)]
-
-    # Apps trend stacked area: pick top 5 apps overall
-    top5_apps = [k for k, _v in apps_counter.most_common(5)]
-    apps_trend = {}
-    for d in labels_days:
-        row = {app: int(app_counts_by_day[d].get(app, 0)) for app in top5_apps}
-        apps_trend[d] = row
 
     # Active time by weekday (bar)
     active_by_wd = Counter()
@@ -516,10 +610,13 @@ def dashboard():
         scope_label = "Scoped"
 
     wh = {k: int(v) for k, v in week_hour.items()}
+    data_in_range = logs_count > 0 or shots_count > 0
 
     return ok(
             {
                 "range": {"from": from_s, "to": to_s},
+                "data_in_range": data_in_range,
+                "bucket": bucket_type,
                 "scope": {"label": scope_label, "role_key": role, "department": dept},
                 "kpis": {
                     "unique_users": len(set(mac_ids)),
@@ -532,34 +629,26 @@ def dashboard():
                     "total_active_minutes": int(total_active_minutes or 0),
                 },
                 "charts": {
-                    # 1) Activity Over Time (Line)
                     "activity_over_time": {
-                        "labels": labels_days,
-                        "series": [{"name": "Active Minutes", "data": activity_minutes_by_day}],
+                        "labels": chart_labels,
+                        "series": [{"name": "Active Minutes", "data": activity_minutes_series}],
                     },
-                    # 2) Top Apps (Bar)
                     "top_apps": {"items": top_apps_items},
-                    # 3) Hourly Heatmap (weekday x hour)
                     "hourly_heatmap": {"week_hour": wh},
-                    # 4) Category Distribution (Donut)
                     "category_distribution": {"items": cat_items},
-                    # 5) Top Categories (Bar)
                     "top_categories": {"items": top_categories_items},
-                    # 6) Apps Trend (Stacked area: top 5 apps over time)
                     "apps_trend": {
-                        "labels": labels_days,
+                        "labels": chart_labels,
                         "keys": top5_apps,
-                        "rows": [{"day": d, **apps_trend[d]} for d in labels_days],
+                        "rows": apps_trend_rows,
                     },
-                    # 7) Active Time by Day of Week (Bar)
                     "active_by_weekday": {
                         "labels": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
                         "data": [active_by_wd[wd] for wd in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]],
                     },
-                    # 8) Screenshots Over Time (Line/Bar)
                     "screenshots_over_time": {
-                        "labels": labels_days,
-                        "series": [{"name": "Screenshots", "data": [shots_by_day[d] for d in labels_days]}],
+                        "labels": chart_labels,
+                        "series": [{"name": "Screenshots", "data": shots_series}],
                     },
                 },
             }

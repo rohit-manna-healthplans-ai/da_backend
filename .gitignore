@@ -1,3 +1,48 @@
-#python
-# Ignore the virtual environment directory
-venv
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Secrets — never commit (use .env.example as template)
+.env
+.env.local
+.env.*.local
+
+# Packaging / install
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Testing & tools
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Logs & temp
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+
+# OS & editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

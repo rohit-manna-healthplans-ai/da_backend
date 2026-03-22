@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 from flask import Blueprint, jsonify, request, g
 
 from auth import hash_password
+from config import MAX_ANALYSIS_DAYS
 from db import users, logs as logs_col, screenshots as shots_col
 from rbac import (
     require_dashboard_access,
@@ -119,7 +120,14 @@ def parse_iso(ts: str) -> Optional[datetime]:
 
 
 def read_bucket(doc: Dict[str, Any], key: str, day: str):
-    return (doc.get(key) or {}).get(day, []) or []
+    val = doc.get(key)
+    if val is None:
+        return []
+    if isinstance(val, list):
+        return []
+    if isinstance(val, dict):
+        return val.get(day, []) or []
+    return []
 
 
 def read_archives(col, mac_id: str, key: str, day: str):
@@ -129,6 +137,51 @@ def read_archives(col, mac_id: str, key: str, day: str):
     prefix = f"{mac_id}|archive|{key}|{day}|"
     safe_prefix = re.escape(prefix)
     return col.find({"_id": {"$regex": f"^{safe_prefix}"}})
+
+
+def _aggregate_days_to_buckets(
+    days: List[str], per_day_values: Dict[str, float], bucket: str
+) -> tuple:
+    """Aggregate per-day series to week or month buckets for large ranges. Returns (labels, values)."""
+    if bucket == "week":
+        buckets: Dict[str, float] = defaultdict(float)
+        for d in days:
+            dt = parse_ymd(d)
+            if not dt:
+                continue
+            # ISO week: e.g. 2024-W01
+            year, week, _ = dt.isocalendar()
+            key = f"{year}-W{week:02d}"
+            buckets[key] += per_day_values.get(d, 0)
+        labels = sorted(buckets.keys(), key=lambda x: (x.split("-")[0], int(x.split("-")[1].replace("W", ""))))
+        return labels, [int(buckets[l]) for l in labels]
+    if bucket == "month":
+        buckets = defaultdict(float)
+        for d in days:
+            key = d[:7]  # YYYY-MM
+            buckets[key] += per_day_values.get(d, 0)
+        labels = sorted(buckets.keys())
+        return labels, [int(buckets[l]) for l in labels]
+    return days, [int(per_day_values.get(d, 0)) for d in days]
+
+
+def _fetch_archives_by_day(col, mac_id: str, key: str, days_set: set) -> Dict[str, List[Dict[str, Any]]]:
+    """Fetch all archive docs for this user/key in one query, grouped by day. Speeds up analysis for large ranges."""
+    if not days_set:
+        return {}
+    # Match all archive docs for this user and key (any day)
+    safe_mac = re.escape(str(mac_id))
+    pattern = f"^{safe_mac}\\|archive\\|{re.escape(key)}\\|"
+    cursor = col.find({"_id": {"$regex": pattern}})
+    by_day: Dict[str, List[Dict[str, Any]]] = {d: [] for d in days_set}
+    for doc in cursor:
+        # _id format: mac|archive|logs|YYYY-MM-DD|chunk
+        parts = (doc.get("_id") or "").split("|")
+        if len(parts) >= 4:
+            day = parts[3]
+            if day in by_day:
+                by_day[day].append(doc)
+    return by_day
 
 
 def get_range_from_request() -> (datetime, datetime, str, str):
@@ -145,6 +198,14 @@ def get_range_from_request() -> (datetime, datetime, str, str):
         end = start
     elif end and not start:
         start = end
+
+    # Production: allow years of data; cap from config to prevent abuse
+    span_days = (end - start).days
+    if span_days > MAX_ANALYSIS_DAYS:
+        end = datetime(end.year, end.month, end.day)
+        start = end - timedelta(days=MAX_ANALYSIS_DAYS - 1)
+        from_s = start.strftime("%Y-%m-%d")
+        to_s = end.strftime("%Y-%m-%d")
 
     return start, end, (from_s or start.strftime("%Y-%m-%d")), (to_s or end.strftime("%Y-%m-%d"))
 
@@ -245,6 +306,7 @@ def get_user_analysis(user_key: str):
     mac = str(u.get("_id"))
     start, end, from_s, to_s = get_range_from_request()
     days = list(daterange(start, end))
+    days_set = set(days)
 
     apps = Counter()
     cats = Counter()
@@ -257,11 +319,15 @@ def get_user_analysis(user_key: str):
     per_day_active_secs = {d: 0 for d in days}
     times_by_day: Dict[str, List[datetime]] = defaultdict(list)
 
+    # Pre-fetch all archive docs for this user (one query per collection) for faster range queries
+    logs_archives_by_day = _fetch_archives_by_day(logs_col, mac, "logs", days_set)
+    shots_archives_by_day = _fetch_archives_by_day(shots_col, mac, "screenshots", days_set)
+
     # Logs
     doc = logs_col.find_one({"_id": mac}) or {}
     for day in days:
         events = list(read_bucket(doc, "logs", day))
-        for a in read_archives(logs_col, mac, "logs", day):
+        for a in logs_archives_by_day.get(day, []):
             events.extend(read_bucket(a, "logs", day))
 
         for e in events:
@@ -292,7 +358,7 @@ def get_user_analysis(user_key: str):
     sdoc = shots_col.find_one({"_id": mac}) or {}
     for day in days:
         items = list(read_bucket(sdoc, "screenshots", day))
-        for a in read_archives(shots_col, mac, "screenshots", day):
+        for a in shots_archives_by_day.get(day, []):
             items.extend(read_bucket(a, "screenshots", day))
 
         for s in items:
@@ -313,8 +379,33 @@ def get_user_analysis(user_key: str):
     for d in days:
         per_day_active_secs[d] = compute_active_minutes(times_by_day[d]) * 60
 
+    data_in_range = logs_count > 0 or shots_count > 0
+
+    # For large ranges, aggregate chart series to week/month so response and charts stay usable
+    n_days = len(days)
+    if n_days > 365:
+        bucket_type = "month"
+    elif n_days > 90:
+        bucket_type = "week"
+    else:
+        bucket_type = "day"
+
+    if bucket_type == "day":
+        chart_labels = days
+        activity_data = [int(per_day_active_secs[d] // 60) for d in days]
+        logs_data = [int(per_day_logs[d]) for d in days]
+        shots_data = [int(per_day_shots[d]) for d in days]
+    else:
+        chart_labels, activity_data = _aggregate_days_to_buckets(
+            days, {d: per_day_active_secs[d] // 60 for d in days}, bucket_type
+        )
+        _, logs_data = _aggregate_days_to_buckets(days, dict(per_day_logs), bucket_type)
+        _, shots_data = _aggregate_days_to_buckets(days, dict(per_day_shots), bucket_type)
+
     return ok({
         "range": {"from": from_s, "to": to_s},
+        "data_in_range": data_in_range,
+        "bucket": bucket_type,
         "kpis": {
             "logs": logs_count,
             "screenshots": shots_count,
@@ -326,16 +417,16 @@ def get_user_analysis(user_key: str):
         },
         "charts": {
             "activity_over_time": {
-                "labels": days,
-                "series": [{"name": "Active Minutes", "data": [int(per_day_active_secs[d] // 60) for d in days]}],
+                "labels": chart_labels,
+                "series": [{"name": "Active Minutes", "data": activity_data}],
             },
             "logs_over_time": {
-                "labels": days,
-                "series": [{"name": "Logs", "data": [int(per_day_logs[d]) for d in days]}],
+                "labels": chart_labels,
+                "series": [{"name": "Logs", "data": logs_data}],
             },
             "screenshots_over_time": {
-                "labels": days,
-                "series": [{"name": "Screenshots", "data": [int(per_day_shots[d]) for d in days]}],
+                "labels": chart_labels,
+                "series": [{"name": "Screenshots", "data": shots_data}],
             },
             "top_apps": {"items": [{"name": k, "count": v} for k, v in apps.most_common(10)]},
             "top_categories": {"items": [{"name": k, "count": v} for k, v in cats.most_common(10)]},

@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Tuple, Optional
 
 from flask import Blueprint, jsonify, request, g
 
+from config import MAX_LIST_DAYS
 from db import ensure_indexes, users, logs, screenshots
 from rbac import require_dashboard_access, ROLE_C_SUITE, ROLE_DEPT_HEAD
 
@@ -46,8 +47,17 @@ def get_overview_data(col, user_mac_ids, from_date=None, to_date=None):
     logs = col["logs"].find(base_query)
     screenshots = col["screenshots"].find(base_query)
 
-    total_logs = sum(len(v) for d in logs for v in d.get("logs", {}).values())
-    total_screenshots = sum(len(v) for d in screenshots for v in d.get("screenshots", {}).values())
+    def _bucket_count(docs, key):
+        n = 0
+        for d in docs:
+            val = d.get(key)
+            if isinstance(val, dict):
+                n += sum(len(v) if isinstance(v, list) else 0 for v in val.values())
+            elif isinstance(val, list):
+                n += len(val)
+        return n
+    total_logs = _bucket_count(logs, "logs")
+    total_screenshots = _bucket_count(screenshots, "screenshots")
 
     return {
         "total_logs": total_logs,
@@ -87,12 +97,11 @@ def get_range_from_request() -> Tuple[datetime, datetime]:
     elif end and not start:
         start = end
 
-    # Safety guard: prevent huge date windows from overloading queries.
-    max_days = 90
+    # Production: configurable cap (list endpoints; analysis uses MAX_ANALYSIS_DAYS)
     span_days = (end - start).days
-    if span_days > max_days:
+    if span_days > MAX_LIST_DAYS:
         end = datetime(end.year, end.month, end.day)
-        start = end - timedelta(days=max_days - 1)
+        start = end - timedelta(days=MAX_LIST_DAYS - 1)
 
     return start, end
 
@@ -131,7 +140,32 @@ def user_map(mac_ids: List[str]) -> Dict[str, Dict[str, Any]]:
 
 
 def read_bucket(doc: Dict[str, Any], key: str, day: str):
-    return (doc.get(key) or {}).get(day, []) or []
+    val = doc.get(key)
+    if val is None:
+        return []
+    if isinstance(val, list):
+        return []
+    if isinstance(val, dict):
+        return val.get(day, []) or []
+    return []
+
+
+def _fetch_archives_by_day(col, mac_id: str, key: str, days_set: set) -> Dict[str, List[Dict[str, Any]]]:
+    """Fetch all archive docs for this user/key in one query, grouped by day."""
+    if not days_set:
+        return {}
+    prefix = f"{mac_id}|archive|{key}|"
+    safe_prefix = re.escape(prefix)
+    pattern = f"^{safe_prefix}"
+    cursor = col.find({"_id": {"$regex": pattern}})
+    by_day: Dict[str, List[Dict[str, Any]]] = {d: [] for d in days_set}
+    for doc in cursor:
+        parts = (doc.get("_id") or "").split("|")
+        if len(parts) >= 4:
+            day = parts[3]
+            if day in by_day:
+                by_day[day].append(doc)
+    return by_day
 
 
 def read_archives(col, mac_id: str, key: str, day: str):
@@ -254,19 +288,22 @@ def get_logs():
         return ok({"items": [], "page": page, "limit": limit, "total": 0})
 
     start, end = get_range_from_request()
+    days_list = list(daterange(start, end))
+    days_set = set(days_list)
     umap = user_map(mac_ids)
     out: List[Dict[str, Any]] = []
 
-    # IMPORTANT: query only filtered IDs (prevents department-level merging in user view)
-    # Project only the logs bucket to keep Mongo payloads small.
+    # Pre-fetch archives in one query per user (production: fast for large ranges)
+    logs_archives_by_user = {mac: _fetch_archives_by_day(logs, mac, "logs", days_set) for mac in mac_ids}
+
     for doc in logs.find({"_id": {"$in": mac_ids}}, {"logs": 1}):
         mac = doc.get("_id")
         u = umap.get(mac, {})
+        archives_for_mac = logs_archives_by_user.get(mac, {})
 
-        for day in daterange(start, end):
-            # Stream events to avoid building large intermediate lists.
+        for day in days_list:
             buckets = [read_bucket(doc, "logs", day)]
-            for a in read_archives(logs, mac, "logs", day):
+            for a in archives_for_mac.get(day, []):
                 buckets.append(read_bucket(a, "logs", day))
 
             for bucket in buckets:
@@ -313,18 +350,21 @@ def get_screenshots():
         return ok({"items": [], "page": page, "limit": limit, "total": 0})
 
     start, end = get_range_from_request()
+    days_list = list(daterange(start, end))
+    days_set = set(days_list)
     umap = user_map(mac_ids)
     out: List[Dict[str, Any]] = []
 
-    # IMPORTANT: query only filtered IDs (prevents department-level merging in user view)
-    # Project only the screenshots bucket to keep Mongo payloads small.
+    shots_archives_by_user = {mac: _fetch_archives_by_day(screenshots, mac, "screenshots", days_set) for mac in mac_ids}
+
     for doc in screenshots.find({"_id": {"$in": mac_ids}}, {"screenshots": 1}):
         mac = doc.get("_id")
         u = umap.get(mac, {})
+        archives_for_mac = shots_archives_by_user.get(mac, {})
 
-        for day in daterange(start, end):
+        for day in days_list:
             buckets = [read_bucket(doc, "screenshots", day)]
-            for a in read_archives(screenshots, mac, "screenshots", day):
+            for a in archives_for_mac.get(day, []):
                 buckets.append(read_bucket(a, "screenshots", day))
 
             for bucket in buckets:

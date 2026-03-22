@@ -42,24 +42,40 @@ except Exception:
     pass
 
 # -----------------------------
-# CORS
+# CORS (explicit origins required when supports_credentials=True)
 # -----------------------------
-if CORS_ORIGINS == "*" or CORS_ORIGINS == ["*"]:
-    CORS(
-        app,
-        resources={r"/*": {"origins": "*"}},
-        supports_credentials=True,
-        allow_headers=["Content-Type", "Authorization"],
-        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    )
-else:
-    CORS(
-        app,
-        resources={r"/*": {"origins": CORS_ORIGINS}},
-        supports_credentials=True,
-        allow_headers=["Content-Type", "Authorization"],
-        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    )
+CORS(
+    app,
+    resources={r"/*": {"origins": CORS_ORIGINS}},
+    supports_credentials=True,
+    allow_headers=["Content-Type", "Authorization"],
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+)
+
+
+def _add_cors_headers(response):
+    """Attach CORS headers to a response so the browser never blocks it."""
+    origin = request.headers.get("Origin")
+    if origin and origin in CORS_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    return response
+
+
+@app.after_request
+def add_cors_headers(response):
+    return _add_cors_headers(response)
+
+
+@app.before_request
+def handle_preflight():
+    """Respond to CORS preflight (OPTIONS) with 204 and CORS headers so browser allows the actual request."""
+    if request.method == "OPTIONS":
+        resp = app.make_response(("", 204))
+        return _add_cors_headers(resp)
+
 
 # -----------------------------
 # Register Blueprints
@@ -92,12 +108,16 @@ def err(msg, status=400):
 
 @app.errorhandler(404)
 def not_found(_):
-    return err("not found", 404)
+    resp = jsonify({"ok": False, "error": "not found"})
+    resp.status_code = 404
+    return _add_cors_headers(resp)
 
 
 @app.errorhandler(500)
 def server_error(_e):
-    return err("internal server error", 500)
+    resp = jsonify({"ok": False, "error": "internal server error"})
+    resp.status_code = 500
+    return _add_cors_headers(resp)
 
 
 def find_user_by_email(email_in: str):
