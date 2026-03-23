@@ -2,7 +2,7 @@ import bcrypt
 from flask import Blueprint, jsonify, request
 
 from app.auth_jwt import issue_token, require_auth, decode_token
-from app.config import COL_USERS
+from app.config import COL_USERS, OPEN_REGISTRATION
 from app.db import get_db, utc_now_iso
 from app.serializers import user_public
 
@@ -81,18 +81,27 @@ def register():
     if db[COL_USERS].find_one({"company_username_norm": email}):
         return jsonify({"ok": False, "error": "Email already registered"}), 409
 
-    # First user bootstrap: allow without auth; afterwards only C_SUITE can register (use admin tools)
+    # First user in DB: always allow signup without token.
+    # After that: need C-Suite JWT, OR OPEN_REGISTRATION=true in env (Render dashboard).
     count = db[COL_USERS].count_documents({})
-    if count > 0:
+    if count > 0 and not OPEN_REGISTRATION:
         auth = request.headers.get("Authorization") or ""
         if not auth.startswith("Bearer "):
-            return jsonify({"ok": False, "error": "Unauthorized"}), 401
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": (
+                        "Registration is closed: log in as C-Suite and add users from the dashboard, "
+                        "or set environment variable OPEN_REGISTRATION=true on the server (staging only)."
+                    ),
+                }
+            ), 403
         pl = decode_token(auth.split(" ", 1)[1].strip())
         if not pl:
-            return jsonify({"ok": False, "error": "Invalid token"}), 401
+            return jsonify({"ok": False, "error": "Invalid or expired token"}), 401
         actor = db[COL_USERS].find_one({"$or": [{"_id": pl.get("sub")}, {"user_mac_id": pl.get("sub")}]})
         if not actor or str(actor.get("role_key") or "").upper() != "C_SUITE":
-            return jsonify({"ok": False, "error": "Only C-Suite can create users after bootstrap"}), 403
+            return jsonify({"ok": False, "error": "Only C-Suite can create users"}), 403
 
     import uuid
 
