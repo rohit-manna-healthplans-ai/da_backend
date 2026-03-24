@@ -5,7 +5,8 @@ from typing import Any, Callable, Dict, Optional
 
 from flask import request, jsonify
 
-from app.config import JWT_SECRET, JWT_EXPIRES_HOURS
+from app.config import COL_USERS, JWT_SECRET, JWT_EXPIRES_HOURS
+from app.db import get_db
 
 
 def issue_token(claims: Dict[str, Any]) -> str:
@@ -25,6 +26,14 @@ def decode_token(token: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def load_user_by_jwt_sub(sub: str):
+    """Resolve users collection row from JWT `sub` (device / user id)."""
+    if not sub:
+        return None
+    db = get_db()
+    return db[COL_USERS].find_one({"$or": [{"_id": sub}, {"user_mac_id": sub}]})
+
+
 def require_auth(f: Callable) -> Callable:
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -35,6 +44,11 @@ def require_auth(f: Callable) -> Callable:
         payload = decode_token(token)
         if not payload:
             return jsonify({"ok": False, "error": "Invalid token"}), 401
+        u = load_user_by_jwt_sub(payload.get("sub") or "")
+        if not u:
+            return jsonify({"ok": False, "error": "Unauthorized"}), 401
+        if u.get("is_active") is False:
+            return jsonify({"ok": False, "error": "Account is disabled"}), 403
         request.jwt_payload = payload
         return f(*args, **kwargs)
 

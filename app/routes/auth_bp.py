@@ -42,6 +42,9 @@ def login():
     if not u or not _check_pw(password, u.get("password_hash") or ""):
         return jsonify({"ok": False, "error": "Invalid credentials"}), 401
 
+    if u.get("is_active") is False:
+        return jsonify({"ok": False, "error": "Account is disabled"}), 403
+
     uid = str(u.get("user_mac_id") or u.get("_id") or "")
     if not uid:
         return jsonify({"ok": False, "error": "User record missing device id"}), 500
@@ -139,6 +142,8 @@ def forgot_password():
     u = db[COL_USERS].find_one({"company_username_norm": email})
     if not u:
         return jsonify({"ok": False, "error": "User not found"}), 404
+    if u.get("is_active") is False:
+        return jsonify({"ok": False, "error": "Account is disabled"}), 403
 
     db[COL_USERS].update_one(
         {"_id": u["_id"]},
