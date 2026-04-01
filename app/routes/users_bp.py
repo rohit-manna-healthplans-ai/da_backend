@@ -3,9 +3,8 @@ from flask import Blueprint, jsonify, request
 from app.auth_jwt import require_auth
 from app.config import COL_USERS
 from app.db import get_db, utc_now_iso
-from app.rbac import list_users_filter_query, load_user_by_id, role_from_user, can_access_user_mac_id
+from app.rbac import list_users_filter_query, load_user_by_id, role_from_user
 from app.serializers import user_public
-from app.user_activity import enrich_user_agent_presence, enrich_users_agent_presence
 import bcrypt
 
 bp = Blueprint("users", __name__, url_prefix="/api/users")
@@ -55,7 +54,6 @@ def list_users():
     db = get_db()
     cur = db[COL_USERS].find(q).sort([("full_name", 1), ("company_username_norm", 1)])
     items = [user_public(d) for d in cur]
-    items = enrich_users_agent_presence(db, items)
     return jsonify({"ok": True, "data": items})
 
 
@@ -76,14 +74,16 @@ def get_user(identifier: str):
 
     # Members may only load their own profile (for "My activity" screen).
     if r == "DEPARTMENT_MEMBER":
-        if not (actor_uid and uid == actor_uid):
-            return jsonify({"ok": False, "error": "Forbidden"}), 403
-    elif not can_access_user_mac_id(actor, uid):
+        if actor_uid and uid == actor_uid:
+            return jsonify({"ok": True, "data": user_public(u)})
         return jsonify({"ok": False, "error": "Forbidden"}), 403
 
-    db = get_db()
-    data = enrich_user_agent_presence(db, user_public(u))
-    return jsonify({"ok": True, "data": data})
+    from app.rbac import can_access_user_mac_id
+
+    if not can_access_user_mac_id(actor, uid):
+        return jsonify({"ok": False, "error": "Forbidden"}), 403
+
+    return jsonify({"ok": True, "data": user_public(u)})
 
 
 @bp.post("")
@@ -127,7 +127,7 @@ def create_user():
         "is_active": bool(body.get("is_active", True)),
     }
     db[COL_USERS].insert_one(doc)
-    return jsonify({"ok": True, "data": enrich_user_agent_presence(db, user_public(doc))})
+    return jsonify({"ok": True, "data": user_public(doc)})
 
 
 @bp.patch("/<path:company_username>")
@@ -148,11 +148,11 @@ def patch_user(company_username: str):
             updates[k] = body[k]
     if body.get("password"):
         updates["password_hash"] = _hash_pw(body["password"])
-    db = get_db()
     if not updates:
-        return jsonify({"ok": True, "data": enrich_user_agent_presence(db, user_public(u))})
+        return jsonify({"ok": True, "data": user_public(u)})
 
     updates["updated_at"] = utc_now_iso()
+    db = get_db()
     db[COL_USERS].update_one({"_id": u["_id"]}, {"$set": updates})
     fresh = db[COL_USERS].find_one({"_id": u["_id"]})
-    return jsonify({"ok": True, "data": enrich_user_agent_presence(db, user_public(fresh))})
+    return jsonify({"ok": True, "data": user_public(fresh)})

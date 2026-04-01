@@ -100,11 +100,6 @@ def ingest_log_payload() -> Dict[str, Any]:
         upsert=True,
     )
 
-    # Heartbeat for dashboard "plugin active" — distinct from web login last_seen_at
-    uid = user_doc.get("_id")
-    if uid is not None:
-        col_users.update_one({"_id": uid}, {"$set": {"agent_last_seen_at": now_iso()}})
-
     return {"ingested": True, "user_mac_id": mac, "day": day_key}
 
 
@@ -158,9 +153,5 @@ def ingest_screenshot_payload() -> Dict[str, Any]:
         },
         upsert=True,
     )
-
-    uid = user_doc.get("_id")
-    if uid is not None:
-        col_users.update_one({"_id": uid}, {"$set": {"agent_last_seen_at": now_iso()}})
 
     return {"ingested": True, "user_mac_id": mac, "day": day_key}
