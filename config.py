@@ -18,7 +18,8 @@ JWT_SECRET = os.getenv("JWT_SECRET", "mysecretkey")
 
 # Mongo
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-MONGO_DB = os.getenv("MONGO_DB", "Discovery_Agent")
+# Prefer MONGO_DB; else MONGO_DB_NAME (same as app.config / docker-compose) so one env works everywhere.
+MONGO_DB = os.getenv("MONGO_DB") or os.getenv("MONGO_DB_NAME", "Discovery_Agent")
 
 # Analysis / Insights date range (production: allow years of data; cap to prevent abuse)
 # e.g. 730 = 2 years, 1095 = 3 years. Use 3650 for ~10 years.
