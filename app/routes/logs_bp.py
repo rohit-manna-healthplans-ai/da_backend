@@ -22,6 +22,7 @@ _LOG_FIELDS = {
     "window_title": 1,
     "operation": 1,
     "screenshot_id": 1,
+    "capture_screen": 1,
     "created_at": 1,
 }
 

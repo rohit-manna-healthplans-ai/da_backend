@@ -44,6 +44,7 @@ def log_row(doc: Dict[str, Any]) -> Dict[str, Any]:
         "window_title": doc.get("window_title"),
         "operation": doc.get("operation"),
         "screenshot_id": doc.get("screenshot_id"),
+        "capture_screen": doc.get("capture_screen"),
         "created_at": doc.get("created_at"),
     }
     return out
@@ -65,6 +66,7 @@ def screenshot_row(doc: Dict[str, Any]) -> Dict[str, Any]:
         "label": doc.get("label") or op,
         "file_path": doc.get("file_path"),
         "screenshot_url": doc.get("screenshot_url"),
+        "capture_screen": doc.get("capture_screen"),
         "created_at": doc.get("created_at"),
     }
     return out
