@@ -1,5 +1,6 @@
 import logging
 
+import ingest as ingest_module
 from flask import Flask, jsonify
 from flask_compress import Compress
 from flask_cors import CORS
@@ -28,6 +29,22 @@ def create_app():
     app.register_blueprint(departments_bp)
     app.register_blueprint(logs_bp)
     app.register_blueprint(screenshots_bp)
+
+    @app.post("/api/ingest/log")
+    def ingest_log_route():
+        try:
+            payload = ingest_module.ingest_log_payload()
+            return jsonify({"ok": True, "data": payload}), 201
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+
+    @app.post("/api/ingest/screenshot")
+    def ingest_screenshot_route():
+        try:
+            payload = ingest_module.ingest_screenshot_payload()
+            return jsonify({"ok": True, "data": payload}), 201
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
 
     with app.app_context():
         try:
