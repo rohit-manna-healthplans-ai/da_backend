@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
 *.so
@@ -13,8 +14,8 @@ ENV/
 
 # Secrets — never commit (use .env.example as template)
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
 # Packaging / install
 *.egg-info/
