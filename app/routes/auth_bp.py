@@ -5,6 +5,7 @@ from app.auth_jwt import issue_token, require_auth, decode_token
 from app.config import COL_USERS, OPEN_REGISTRATION
 from app.db import get_db, utc_now_iso
 from app.serializers import user_public
+from app.user_activity import enrich_user_agent_presence
 
 bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 
@@ -62,7 +63,8 @@ def me():
     u = db[COL_USERS].find_one({"$or": [{"_id": uid}, {"user_mac_id": uid}]})
     if not u:
         return jsonify({"ok": False, "error": "User not found"}), 404
-    return jsonify({"ok": True, "data": user_public(u)})
+    data = enrich_user_agent_presence(db, user_public(u))
+    return jsonify({"ok": True, "data": data})
 
 
 @bp.post("/register")

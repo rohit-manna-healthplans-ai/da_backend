@@ -5,7 +5,7 @@ from app.auth_jwt import require_auth
 from app.azure_blob import azure_credentials_configured, build_read_sas_url, resolve_blob_location
 from app.config import COL_SCREENSHOTS, COL_USERS
 from app.db import get_db
-from app.rbac import can_access_user_mac_id, load_user_by_id
+from app.rbac import can_access_user_mac_id, load_user_by_id, resolve_self_scoped_user_mac_id
 from app.serializers import screenshot_row
 from app.time_range import range_iso_strings
 
@@ -67,14 +67,12 @@ def list_screenshots():
 
     db = get_db()
 
-    if not user_mac_id and company_username:
-        low = company_username.lower()
-        u = db[COL_USERS].find_one(
-            {"$or": [{"company_username_norm": low}, {"company_username": company_username}]},
-            {"_id": 1, "user_mac_id": 1},
-        )
-        if u:
-            user_mac_id = str(u.get("user_mac_id") or u.get("_id") or "")
+    user_mac_id = resolve_self_scoped_user_mac_id(
+        actor,
+        db,
+        user_mac_id=user_mac_id,
+        company_username=company_username,
+    )
 
     if not user_mac_id:
         return jsonify({"ok": False, "error": "user_mac_id (or company_username) required"}), 400

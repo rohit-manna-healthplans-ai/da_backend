@@ -55,6 +55,56 @@ def allowed_user_mac_ids_for_actor(actor: Dict[str, Any]) -> Optional[Set[str]]:
     return set()
 
 
+def actor_user_mac_id(actor: Dict[str, Any]) -> str:
+    return str(actor.get("user_mac_id") or actor.get("_id") or "").strip()
+
+
+def resolve_target_user_mac_id(
+    db,
+    *,
+    user_mac_id: str = "",
+    company_username: str = "",
+) -> str:
+    user_mac_id = (user_mac_id or "").strip()
+    company_username = (company_username or "").strip()
+    if user_mac_id:
+        return user_mac_id
+    if not company_username:
+        return ""
+    low = company_username.lower()
+    u = db[COL_USERS].find_one(
+        {"$or": [{"company_username_norm": low}, {"company_username": company_username}]},
+        {"_id": 1, "user_mac_id": 1},
+    )
+    if not u:
+        return ""
+    return str(u.get("user_mac_id") or u.get("_id") or "").strip()
+
+
+def resolve_self_scoped_user_mac_id(
+    actor: Dict[str, Any],
+    db,
+    *,
+    user_mac_id: str = "",
+    company_username: str = "",
+) -> str:
+    """Members may only query their own device id; managers/admins keep existing rules."""
+    target_uid = resolve_target_user_mac_id(
+        db,
+        user_mac_id=user_mac_id,
+        company_username=company_username,
+    )
+    if role_from_user(actor) == ROLE_MEMBER:
+        actor_uid = actor_user_mac_id(actor)
+        if not actor_uid:
+            return ""
+        if not target_uid:
+            return actor_uid
+        if target_uid != actor_uid:
+            return ""
+    return target_uid
+
+
 def can_access_user_mac_id(actor: Dict[str, Any], target_uid: str) -> bool:
     allowed = allowed_user_mac_ids_for_actor(actor)
     if allowed is None:

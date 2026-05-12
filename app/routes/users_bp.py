@@ -3,7 +3,7 @@ from flask import Blueprint, jsonify, request
 from app.auth_jwt import require_auth
 from app.config import COL_USERS
 from app.db import get_db, utc_now_iso
-from app.rbac import list_users_filter_query, load_user_by_id, role_from_user, can_access_user_mac_id
+from app.rbac import list_users_filter_query, load_user_by_id, role_from_user, can_access_user_mac_id, actor_user_mac_id
 from app.serializers import user_public
 from app.user_activity import enrich_user_agent_presence, enrich_users_agent_presence
 import bcrypt
@@ -58,6 +58,18 @@ def list_users():
     return jsonify({"ok": True, "data": items})
 
 
+@bp.get("/me")
+@require_auth
+def get_me():
+    actor = _actor(request)
+    if not actor:
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+
+    db = get_db()
+    data = enrich_user_agent_presence(db, user_public(actor))
+    return jsonify({"ok": True, "data": data})
+
+
 @bp.get("/<path:identifier>")
 @require_auth
 def get_user(identifier: str):
@@ -71,7 +83,7 @@ def get_user(identifier: str):
         return jsonify({"ok": False, "error": "User not found"}), 404
 
     uid = str(u.get("user_mac_id") or u.get("_id"))
-    actor_uid = str(actor.get("user_mac_id") or actor.get("_id") or "")
+    actor_uid = actor_user_mac_id(actor)
 
     if r == "DEPARTMENT_MEMBER":
         if not (actor_uid and uid == actor_uid):

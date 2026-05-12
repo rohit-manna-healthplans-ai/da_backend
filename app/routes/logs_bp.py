@@ -3,7 +3,7 @@ from flask import Blueprint, jsonify, request
 from app.auth_jwt import require_auth
 from app.config import COL_LOGS, COL_USERS
 from app.db import get_db
-from app.rbac import can_access_user_mac_id, load_user_by_id
+from app.rbac import can_access_user_mac_id, load_user_by_id, resolve_self_scoped_user_mac_id
 from app.serializers import log_row
 from app.time_range import range_iso_strings
 
@@ -54,15 +54,12 @@ def list_logs():
 
     db = get_db()
 
-    # Resolve user id from email if needed (fast path prefers user_mac_id)
-    if not user_mac_id and company_username:
-        low = company_username.lower()
-        u = db[COL_USERS].find_one(
-            {"$or": [{"company_username_norm": low}, {"company_username": company_username}]},
-            {"_id": 1, "user_mac_id": 1},
-        )
-        if u:
-            user_mac_id = str(u.get("user_mac_id") or u.get("_id") or "")
+    user_mac_id = resolve_self_scoped_user_mac_id(
+        actor,
+        db,
+        user_mac_id=user_mac_id,
+        company_username=company_username,
+    )
 
     if not user_mac_id:
         return jsonify({"ok": False, "error": "user_mac_id (or company_username) required"}), 400

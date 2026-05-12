@@ -80,6 +80,12 @@ def ingest_log_payload() -> Dict[str, Any]:
         "window_title": body.get("window_title"),
         "meta": body.get("meta") or {},
     }
+    if body.get("log_id") is not None:
+        log_rec["log_id"] = body.get("log_id")
+    if body.get("screenshot_id") is not None:
+        log_rec["screenshot_id"] = body.get("screenshot_id")
+    if body.get("capture_screen") is not None:
+        log_rec["capture_screen"] = body.get("capture_screen")
 
     mac = normalize_mac(mac_id)
     col_logs.update_one(
@@ -138,6 +144,10 @@ def ingest_screenshot_payload() -> Dict[str, Any]:
         "user_mac_id": normalize_mac(body.get("user_mac_id") or mac_id),
         "meta": body.get("meta") or {},
     }
+    if body.get("screenshot_id") is not None:
+        ss_rec["screenshot_id"] = body.get("screenshot_id")
+    if body.get("capture_screen") is not None:
+        ss_rec["capture_screen"] = body.get("capture_screen")
 
     mac = normalize_mac(mac_id)
     col_screenshots.update_one(
